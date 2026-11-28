@@ -6,13 +6,13 @@
 // 实验设计：
 //   2×1 设计：set size (4, 6)，所有试次均为 change trial
 //   SS4 和 SS6 各 40 trial，共 80 trial，均分到 4 个 block（每 block 20 trial）
-//   练习 10 trial（2 种 set size × 5）
+//   练习 8 trial（2 种 set size × 4）
 //
 // 试次结构：
 //   1. ITI              (500 ms)    显示注视点
 //   2. 学习阵列         (250 ms)    显示注视点
 //   3. 保留间隔         (1000 ms)   显示注视点（注视点全程固定显示，不消失）
-//   4. 测试阵列         (无时间限制) 显示注视点
+//   4. 测试阵列         (正式试次 4000 ms) 显示注视点
 //
 // Block 规则：
 //   4 个 block，每 block 20 trial；block 间强制休息至少 15 秒（含倒计时），
@@ -21,16 +21,13 @@
 //   低正确率只做标记：set size = 4 的平均正确率低于 50% 时，
 //   在导出文件名最前面加 F（如 F20260910_1234567890.xlsx）
 //
-// 调试模式（被试信息四个输入框全部填 1，隐藏触发）：
-//   除每个 block 试次数 35 → 5（共 20 trial）外，其余流程与正式实验完全一致
-//   （练习 10 trial、block 间强制休息 ≥30 秒、数据保存等均不变）
-//   被试编号与随机种子固定为 1111，导出文件名固定为 1111.xlsx
+// 调试模式（组别 0）：每组 5 试次，共 20 正式试次；编号与种子固定为 1111，仅导出本地文件。
 //
 // 导出（Excel，3 个 sheet，调试模式与正式实验规则完全一致）：
 //   文件名：正式实验 = 实验日期_被试编号（YYYYMMDD_编号），
 //                      SS4 平均正确率 < 50% 时前面加 F；
 //           调试模式 = 1111.xlsx（固定，不加 F）
-//   Sheet1 被试信息：姓名 / 性别 / 年龄 / 身份证号 / 手机号
+//   被试标识使用匿名编号，不要求姓名、身份证号或手机号码。
 //   Sheet2 实验数据：全部 trial 的 SetSize、正确按键、被试实际按键、反应时、是否正确
 //   Sheet3 实验结果：SS4 / SS6 各自的 Acc、平均 RT（正确试次）、K
 //                   以及「低正确率标记」（SS4 平均正确率 < 50% 时为 1）
@@ -59,7 +56,7 @@
 
 // 运行版本标记（与 clt.html 中 clt.js?v= 保持一致）：
 // 用于确认浏览器实际加载的是最新代码，而非缓存里的旧版本
-const CLT_BUILD = '20261120-123890-3';
+const CLT_BUILD = '20261128-123890-qa2';
 console.log('[CLT] build ' + CLT_BUILD + ' loaded');
 
 // 在设置页显示当前 build（确认浏览器加载的是最新代码，而非缓存中的旧版）
@@ -173,6 +170,25 @@ const ctx = canvas.getContext('2d', { alpha: false });
 // --- 匿名被试编号：仅依据组别生成，不收集任何个人信息 ---
 const subjectIDInput = document.getElementById('subjectID');
 const subGroupInput = document.getElementById('subGroup');
+const participantCodeInput = document.getElementById('participantCode');
+const PARTICIPANT_CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/;
+let automaticIdentity = null;
+
+function participantSeed(subjectID) {
+    let hash = 2166136261;
+    for (const ch of String(subjectID)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
+    return (hash >>> 0) || 1;
+}
+
+function resolveParticipantID(group, code) {
+    if (group === '0') return '1111';
+    if (code) return PARTICIPANT_CODE_PATTERN.test(code) ? code : '';
+    if (!automaticIdentity || automaticIdentity.group !== group) {
+        automaticIdentity = { group, id: generateSubjectID(group) };
+    }
+    return automaticIdentity.id;
+}
+
 function generateSubjectID(subGroupValue) {
     const group = normalizeDigits(subGroupValue);
     if (group === '0') return '1111';
@@ -182,9 +198,15 @@ function generateSubjectID(subGroupValue) {
     return `${group}_${order}_${suffix}`;
 }
 function updateSubjectID() {
-    if (subjectIDInput && subGroupInput) subjectIDInput.value = /^[012]$/.test(normalizeDigits(subGroupInput.value)) ? generateSubjectID(subGroupInput.value) : '';
+    const group = readSubGroup();
+    if (participantCodeInput) participantCodeInput.disabled = group === '0';
+    if (subjectIDInput) subjectIDInput.value = /^[012]$/.test(group)
+        ? resolveParticipantID(group, participantCodeInput ? participantCodeInput.value : '')
+        : '';
 }
 if (subGroupInput) subGroupInput.addEventListener('input', updateSubjectID);
+if (participantCodeInput) participantCodeInput.addEventListener('input', updateSubjectID);
+updateSubjectID();
 
 // 掩蔽身份证号（用于数据导出，保护隐私）
 function maskIdCard(idCard) {
@@ -253,28 +275,18 @@ document.getElementById('start-btn').addEventListener('click', async () => {
     }
     p.subGroup = Number(subGroupValue);
 
-    // 匿名编号由组别生成；0 为固定调试编号。
-    p.subjectID = generateSubjectID(subGroupValue);
-    if (subjectIDInput) subjectIDInput.value = p.subjectID;
-    const seedNum = Number.parseInt(p.subjectID.replace(/\D/g, '').slice(-9), 10);
-    p.rndSeed = Number.isFinite(seedNum) ? seedNum : Date.now();
-    p.saveLocal = true; // 保存到本地始终开启（复选框已隐藏，网页端数据库 + 本地均保存）
-    p.expDate = formatDateYYYYMMDD(new Date()); // 实验日期（导出文件名用）
-
-    // 调试模式触发（复选框已隐藏）：姓名字段填 1
-    // （性别为下拉选择，不参与判定；subjectID 自动生成不受影响）
-    // 判定做了容错：中文输入法打出的全角「１」自动折算为半角
-    const normalizeOnes = (v) => String(v == null ? '' : v)
-        .trim()
-        .replace(/[\uFF10-\uFF19]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFF10 + 0x30));
-    const isAllOnes = (v) => /^1+$/.test(normalizeOnes(v));
-    p.debugMode = subGroupValue === '0';
-    if (p.debugMode) {
-        console.log('[CLT] 调试模式已触发（姓名为 1）');
-    } else {
-        console.log(`[CLT] 正式模式（姓名="${p.subName}" 年龄="${p.subAge}" ` +
-            `身份证号长度=${String(p.subIdCard || '').length} 手机号="${p.subPhone}"）`);
+    // 可选的研究团队编号仅用于匿名配对；留空仍自动编号。
+    p.subjectID = resolveParticipantID(subGroupValue, participantCodeInput ? participantCodeInput.value : '');
+    if (!p.subjectID) {
+        alert('请填写主试分配的 6–64 位匿名编号，或留空自动生成。');
+        return;
     }
+    if (subjectIDInput) subjectIDInput.value = p.subjectID;
+    p.rndSeed = p.subGroup === 0 ? 1111 : participantSeed(p.subjectID);
+    p.saveLocal = true; // 保存到本地始终开启（复选框已隐藏，网页端数据库 + 本地均保存）
+
+    p.debugMode = subGroupValue === '0';
+    console.log(p.debugMode ? '[CLT] 调试模式：仅本地导出' : '[CLT] 正式模式');
 
     // 调试模式：练习、正式实验流程、block 间休息等全部与正式实验完全一致，
     // 唯一差异是每个 block 的试次数由 35 降为 5（4 block × 5 = 20 trial，SS4/SS6 各 10）；
@@ -290,7 +302,7 @@ document.getElementById('start-btn').addEventListener('click', async () => {
     seedRandom(p.rndSeed);
 
     try {
-        if (SUPABASE_URL !== "YOUR_SUPABASE_URL_HERE") {
+        if (!p.debugMode && SUPABASE_URL !== "YOUR_SUPABASE_URL_HERE") {
             supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
                 auth: { persistSession: false }
             });
@@ -318,8 +330,15 @@ function switchScreen(screenName) {
 window.addEventListener('keydown', (e) => {
     // 长按产生的重复按键一律忽略：否则一次试次会被记录多次，
     // 并触发多条并行的试次流程，导致界面上出现「多个色块同时变色」。
-    if (e.repeat) return;
+    if (e.repeat || document.hidden) return;
 
+    if (experimentPhase === 'interruption_pause' && (e.code === 'Space' || e.key === ' ')) {
+        e.preventDefault();
+        const resume = resumeAfterInterruption;
+        resumeAfterInterruption = null;
+        if (resume) resume();
+        return;
+    }
     if (experimentPhase === 'instructions' && (e.code === 'Space' || e.key === ' ')) {
         e.preventDefault();
         startPractice();
@@ -359,7 +378,7 @@ function keyToLabelSlot(keyChar) {
 // 保证颜色、位置、标签三者来自同一次抽取，不会互相错位。
 
 // ============================================================
-//  练习阶段（20 trial，2 种 set size × 10，全部 change）
+//  练习阶段（8 trial，2 种 set size × 4，全部 change）
 // ============================================================
 let practiceTrials = [];
 let practiceTrialIdx = 0;
@@ -504,6 +523,11 @@ function drawPlanSquares(plan, colorIdxArr) {
 }
 
 async function runPracticeTrial() {
+    if (!hasExperimentFocus()) {
+        pauseForInterruption(runPracticeTrial);
+        return;
+    }
+    const epoch = ++trialEpoch;
     if (practiceTrialIdx >= practiceTrials.length) {
         endPractice();
         return;
@@ -521,10 +545,11 @@ async function runPracticeTrial() {
     drawBackground(); drawFixation();
     await wait(prefs.ITI);
 
-    await showStudyArrayPractice(condition);
+    if (epoch !== trialEpoch) return;
+    await showStudyArrayPractice(condition, epoch);
 }
 
-async function showStudyArrayPractice(condition) {
+async function showStudyArrayPractice(condition, epoch) {
     // 一次算好并冻结本试次的视觉计划：记忆阵列 / 探测阵列 / 位置 / 标签
     // 计划内已保证「有且只有一个方块变色」且「新颜色不在记忆阵列中出现」
     const plan = buildProbePlan(condition.setSize);
@@ -535,10 +560,12 @@ async function showStudyArrayPractice(condition) {
     drawBackground(); drawFixation();
     drawPlanSquares(plan, plan.memColors);
     await wait(prefs.studyDuration);
+    if (epoch !== trialEpoch) return;
 
     // 保留间隔（注视点全程固定显示，不消失）
     drawBackground(); drawFixation();
     await wait(prefs.retentionInterval);
+    if (epoch !== trialEpoch) return;
 
     // 探测阵列：直接用同一个 plan 的 probeColors，任何情况下都只有一个方块变色
     showTestArrayPractice(plan);
@@ -584,7 +611,9 @@ function recordPracticeResponse(responseNum, keyChar) {
 }
 
 function endPractice() {
-    let accPct = Math.round(practiceAcc.reduce((a, b) => a + b, 0) / practiceAcc.length * 100);
+    const accPct = practiceAcc.length > 0
+        ? Math.round(practiceAcc.reduce((a, b) => a + b, 0) / practiceAcc.length * 100) + '%'
+        : '无有效试次';
     experimentPhase = 'practice_end';
     drawBackground();
 
@@ -594,7 +623,7 @@ function endPractice() {
     ctx.font = 'bold 36px Inter, sans-serif';
     ctx.fillText('练习结束', canvas.width / 2, canvas.height / 2 - 80);
     ctx.font = '28px Inter, sans-serif';
-    ctx.fillText(`正确率：${accPct}%`, canvas.width / 2, canvas.height / 2 - 20);
+    ctx.fillText(`正确率：${accPct}`, canvas.width / 2, canvas.height / 2 - 20);
     ctx.font = '20px Inter, sans-serif';
     ctx.fillStyle = 'rgb(255,235,59)';
     ctx.fillText('按 空格键(Space) 开始正式实验', canvas.width / 2, canvas.height / 2 + 60);
@@ -604,7 +633,9 @@ function endPractice() {
 //  正式实验阶段
 // ============================================================
 function startFormal() {
-    // 预生成 90 trial（SS4×45 + SS6×45，随机顺序），全部 change
+    // 正式随机流独立于练习；同一匿名编号与构建版本可复现顺序。
+    seedRandom(p.rndSeed + 7919);
+    // 正式组为 SS4×40 + SS6×40，随机顺序，全部为 change。
     let allSS = [];
     let nEachSS = prefs.nEachSS;
     for (let ss of prefs.setSizes) {
@@ -644,6 +675,11 @@ function startBlock() {
 }
 
 async function runTrial() {
+    if (!hasExperimentFocus()) {
+        pauseForInterruption(runTrial);
+        return;
+    }
+    const epoch = ++trialEpoch;
     if (currentTrial >= blockTrials.length) {
         endBlock();
         return;
@@ -659,11 +695,12 @@ async function runTrial() {
         subName: p.subName,
         block: currentBlock,
         trial: currentTrial + 1,
+        TrialGlobal: formalTrialGlobalIdx + 1,
         setSize: condition.setSize,
         isChange: 1,
         experimentType: 'CLT',
         studyDuration: prefs.studyDuration,
-        studyDurationActual: prefs.studyDuration,
+        studyDurationActual: null,
         subGroup: p.subGroup,
         rndSeed: p.rndSeed,
         subGender: p.subGender,
@@ -676,10 +713,11 @@ async function runTrial() {
     drawBackground(); drawFixation();
     await wait(prefs.ITI);
 
-    await showStudyArray(condition);
+    if (epoch !== trialEpoch) return;
+    await showStudyArray(condition, epoch);
 }
 
-async function showStudyArray(condition) {
+async function showStudyArray(condition, epoch) {
     // 一次算好并冻结本试次的视觉计划：记忆阵列 / 探测阵列 / 位置 / 标签
     // 计划内已保证「有且只有一个方块变色」且「新颜色不在记忆阵列中出现」
     const plan = buildProbePlan(condition.setSize);
@@ -692,11 +730,15 @@ async function showStudyArray(condition) {
     // 学习阵列（仅方块，无标签）
     drawBackground(); drawFixation();
     drawPlanSquares(plan, plan.memColors);
+    const studyStart = performance.now();
     await wait(prefs.studyDuration);
+    if (epoch !== trialEpoch) return;
+    trialData.studyDurationActual = Number((performance.now() - studyStart).toFixed(2));
 
     // 保留间隔（注视点全程固定显示，不消失）
     drawBackground(); drawFixation();
     await wait(prefs.retentionInterval);
+    if (epoch !== trialEpoch) return;
 
     trialData.changeItem = plan.changeIdx;
     trialData.origColorIdx = plan.origColor;
@@ -713,6 +755,59 @@ async function showStudyArray(condition) {
 // 反应时限（4000 ms 内未反应记为超时）
 const RESPONSE_LIMIT_MS = 4000;
 let responseTimer = null;
+let trialEpoch = 0;
+let resumeAfterInterruption = null;
+let wasFullscreen = Boolean(document.fullscreenElement);
+
+function hasExperimentFocus() {
+    return !document.hidden && (typeof document.hasFocus !== 'function' || document.hasFocus());
+}
+
+function pauseForInterruption(resume) {
+    resumeAfterInterruption = resume;
+    experimentPhase = 'interruption_pause';
+    drawBackground();
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '22px Inter, sans-serif';
+    ctx.fillText('实验已暂停。返回实验页面后按空格继续。', canvas.width / 2, canvas.height / 2);
+}
+
+function interruptActiveTrial(reason) {
+    const formal = experimentPhase === 'trial_running' || experimentPhase === 'trial_response';
+    const practice = experimentPhase === 'practice_running' || experimentPhase === 'practice_response';
+    if (!formal && !practice) return;
+    ++trialEpoch; // 忽略已经排队的绘制和等待回调。
+    if (responseTimer !== null) {
+        clearTimeout(responseTimer);
+        responseTimer = null;
+    }
+    const interruption = {
+        rt: null, response: null, responseKey: null, accuracy: null,
+        timeout: false, TrialStatus: 'interrupted', CountedInK: 0, InterruptionReason: reason
+    };
+    if (formal) {
+        stimData.push({ ...trialData, ...interruption });
+        currentTrial++;
+        formalTrialGlobalIdx++;
+        pauseForInterruption(runTrial);
+    } else {
+        practiceData.push({ ...practiceTrialData, ...interruption });
+        practiceTrialIdx++;
+        pauseForInterruption(runPracticeTrial);
+    }
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) interruptActiveTrial('visibility_hidden');
+});
+window.addEventListener('blur', () => interruptActiveTrial('window_blur'));
+document.addEventListener('fullscreenchange', () => {
+    const fullscreen = Boolean(document.fullscreenElement);
+    if (wasFullscreen && !fullscreen) interruptActiveTrial('fullscreen_exit');
+    wasFullscreen = fullscreen;
+});
 
 function showTestArray(plan) {
     drawBackground(); drawFixation();
@@ -728,7 +823,10 @@ function showTestArray(plan) {
     
     // 启动超时计时器
     responseTimer = setTimeout(() => {
-        if (experimentPhase === 'trial_response') {
+        if (experimentPhase !== 'trial_response') return;
+        if (!hasExperimentFocus()) {
+            interruptActiveTrial('focus_not_available');
+        } else {
             handleTimeout();
         }
     }, RESPONSE_LIMIT_MS);
@@ -744,6 +842,9 @@ function handleTimeout() {
     trialData.responseKey = null;
     trialData.accuracy = 0;
     trialData.timeout = true;
+    trialData.correctKey = LABEL_CHARS[trialLabels[correctLabel - 1]];
+    trialData.correctColorIdx = trialPlan.probeColors[trialPlan.changeIdx];
+    trialData.correctRGB = colors_9[trialData.correctColorIdx].join(',');
     trialData.TrialStatus = 'timeout';
     trialData.CountedInK = 0;
     
@@ -778,11 +879,10 @@ function recordResponse(responseNum, keyChar) {
     // 记录正确按键
     trialData.correctKey = LABEL_CHARS[trialLabels[correctLabel - 1]];
 
-    // 记录被试选择颜色与正确颜色的 RGB
-    const clickedColorIdx = (responseNum !== null && responseNum >= 1 && responseNum <= currentNItems)
-        ? activeColors[responseNum - 1]
-        : null;
-    const correctColorIdx = activeColors[changeItemIdx];
+    // 按键映射到标签槽，再映射到探测阵列上的实际色块。
+    const selectedItem = trialPlan.labelMap[responseNum - 1];
+    const clickedColorIdx = Number.isInteger(selectedItem) ? trialPlan.probeColors[selectedItem] : null;
+    const correctColorIdx = trialPlan.probeColors[trialPlan.changeIdx];
     trialData.responseColorIdx = clickedColorIdx;
     trialData.correctColorIdx = correctColorIdx;
     trialData.responseRGB = clickedColorIdx !== null ? colors_9[clickedColorIdx].join(',') : null;
@@ -797,21 +897,21 @@ function recordResponse(responseNum, keyChar) {
 }
 
 // ============================================================
-//  Block 间休息（强制 ≥30 秒倒计时，倒计时结束后按 SPACE 进入下一组）
+//  Block 间休息（强制 ≥15 秒倒计时，倒计时结束后按 SPACE 进入下一组）
 // ============================================================
 let breakTimer = null;
 const BREAK_MIN_SECONDS = 15;   // block 间强制休息至少 15 秒，与原始 exp1_clt 一致
 
 // 计算某个 block 的正确率（%）
 function blockAccuracyPct(blockNo) {
-    let rows = stimData.filter(d => d.block === blockNo);
-    if (rows.length === 0) return 0;
+    let rows = stimData.filter(d => d.block === blockNo && d.TrialStatus !== 'interrupted');
+    if (rows.length === 0) return null;
     return Math.round(rows.reduce((s, d) => s + d.accuracy, 0) / rows.length * 100);
 }
 
 // set size = 4 的平均正确率（%）；没有 SS4 数据时返回 null
 function ss4AccuracyPct() {
-    const rows = stimData.filter(d => d.setSize === 4);
+    const rows = stimData.filter(d => d.setSize === 4 && d.TrialStatus !== 'interrupted');
     if (rows.length === 0) return null;
     return rows.reduce((s, d) => s + d.accuracy, 0) / rows.length * 100;
 }
@@ -829,7 +929,7 @@ function endBlock() {
     // 只统计正确率低于 50% 的 block 数量（写入结果表备查）。
     // 已取消「累计 2 个 block 低于 50% 自动结束实验」的规则：
     // 无论正确率高低，实验都完整跑完 4 个 block，低正确率只在导出文件名上加 F。
-    if (blockAcc < 50) lowAccBlockCount++;
+    if (blockAcc !== null && blockAcc < 50) lowAccBlockCount++;
 
     if (currentBlock < prefs.numBlocks) {
         showBreakScreen(blockAcc);
@@ -841,7 +941,7 @@ function endBlock() {
 function showBreakScreen(blockAcc) {
     switchScreen('break');
     experimentPhase = 'break_countdown';
-    document.getElementById('rest-acc').innerText = `您的正确率为 ${blockAcc}%`;
+    document.getElementById('rest-acc').innerText = blockAcc === null ? '本组没有可统计的试次。' : `您的正确率为 ${blockAcc}%`;
     startBreakCountdown();
 }
 
@@ -883,20 +983,6 @@ function nextBlock() {
     startBlock();
 }
 
-// 保存前统一补齐被试信息（保证每一行都带完整的被试信息）
-function enrichRows(rows) {
-    for (let d of rows) {
-        d.subName = p.subName;
-        d.subGender = p.subGender;
-        d.subAge = p.subAge;
-        d.subIdCard = maskIdCard(p.subIdCard); // 导出掩蔽后的身份证号
-        d.subPhone = p.subPhone;
-        d.subjectID = p.subjectID;
-        d.rndSeed = p.rndSeed;
-    }
-    return rows;
-}
-
 // ============================================================
 //  数据保存
 // ============================================================
@@ -916,66 +1002,61 @@ function stripToBaseColumns(row) {
 }
 
 async function finishExperiment() {
-    switchScreen('upload');
     experimentPhase = 'upload';
-
-    let uploadMsg = "";
-    let uploadFailed = false;
-
     enrichRows(stimData);
 
-    if (supabaseClient && stimData.length > 0) {
-        try {
-            const { error } = await supabaseClient.from('vwm_data').insert(stimData);
-            if (error) throw error;
-            uploadMsg += "数据上传服务器成功。";
-        } catch (error) {
-            console.error("Supabase Error:", error);
-            // 兼容旧表结构：剔除 CLT 新增列后重试
-            try {
-                const { error: retryError } = await supabaseClient
-                    .from('vwm_data').insert(stimData.map(stripToBaseColumns));
-                if (retryError) throw retryError;
-                uploadMsg += "数据上传服务器成功（按基础字段）。";
-            } catch (retryErr) {
-                console.error("Supabase Retry Error:", retryErr);
-                uploadFailed = true;
-                uploadMsg += "服务器上传失败: " + retryErr.message + "。";
-            }
-        }
-    } else if (!supabaseClient) {
-        uploadFailed = true;
-        uploadMsg += "未配置服务器上传。";
-    }
+    // Excel 导出还会补充本地分组等字段，先保留原始的云端载荷，避免上传列意外变化。
+    const cloudRows = !p.debugMode && supabaseClient ? stimData.map(row => ({ ...row })) : [];
+    const localStatus = document.getElementById('local-save-status');
+    const cloudStatus = document.getElementById('cloud-save-status');
+    localStatus.innerText = p.saveLocal ? '本地 Excel：准备中。' : '本地 Excel：未选择导出。';
+    cloudStatus.innerText = p.debugMode
+        ? '服务器：调试模式，未上传。'
+        : !supabaseClient
+            ? '服务器：未配置上传。'
+            : cloudRows.length === 0
+                ? '服务器：没有可上传的试次。'
+                : '服务器：正在上传，请暂勿关闭页面。';
+    // 手动下载链接位于结束页；先显示结束页，不用等网络请求完成。
+    switchScreen('finished');
 
     if (p.saveLocal && stimData.length > 0) {
         try {
             downloadXLSX();
-            uploadMsg += "本地 Excel 已生成下载。";
-        } catch (e) {
-            console.error('[CLT] 本地导出失败:', e);
-            uploadFailed = true;
-            uploadMsg += "本地 Excel 导出失败：" + e.message + "。";
+            localStatus.innerText = '本地 Excel：文件已生成，可从下方链接下载。';
+        } catch (error) {
+            console.error('[CLT] 本地导出失败:', error);
+            localStatus.innerText = '本地 Excel：导出失败。';
         }
+    } else if (p.saveLocal) {
+        localStatus.innerText = '本地 Excel：没有可导出的试次。';
     }
 
-    document.getElementById('upload-status').innerText = uploadMsg;
+    try {
+        if (document.exitFullscreen) {
+            const exiting = document.exitFullscreen();
+            if (exiting) exiting.catch(() => {});
+        }
+    } catch (error) { /* 已非全屏时无需处理 */ }
 
-    // 结束语画面保持干净：仅在异常时显示状态说明
-    const statusEl = document.getElementById('finished-text');
-    if (statusEl) {
-        if (uploadFailed) {
-            statusEl.innerText = uploadMsg;
-            statusEl.classList.remove('hidden');
-        } else {
-            statusEl.innerText = '';
-            statusEl.classList.add('hidden');
+    if (cloudRows.length === 0) return;
+    try {
+        const { error } = await supabaseClient.from('vwm_data').insert(cloudRows);
+        if (error) throw error;
+        cloudStatus.innerText = '服务器：上传成功。';
+    } catch (error) {
+        console.error('Supabase Error:', error);
+        // 兼容旧表结构：保留原有的一次基础字段回退。
+        try {
+            const { error: retryError } = await supabaseClient
+                .from('vwm_data').insert(cloudRows.map(stripToBaseColumns));
+            if (retryError) throw retryError;
+            cloudStatus.innerText = '服务器：仅保存了基础字段；请保留完整的本地 Excel。';
+        } catch (retryError) {
+            console.error('Supabase Retry Error:', retryError);
+            cloudStatus.innerText = '服务器：上传失败。请查看上方本地 Excel 状态。';
         }
     }
-
-    setTimeout(() => { switchScreen('finished'); }, 2000);
-
-    try { if (document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
 }
 
 // ============================================================
@@ -1018,7 +1099,8 @@ const TRIAL_EXPORT_COLUMNS = [
     { header: 'ItemColors',        text: true, get: (d) => d.itemColors },
     { header: 'LabelMap',          text: true, get: (d) => d.labelMap },
     { header: 'TrialLabels',       text: true, get: (d) => d.trialLabels },
-    { header: 'LabelChars',        text: true, get: (d) => d.labelChars }
+    { header: 'LabelChars',        text: true, get: (d) => d.labelChars },
+    { header: 'InterruptionReason', text: true, get: (d) => d.InterruptionReason }
 ];
 
 const K_EXPORT_COLUMNS = [
@@ -1026,7 +1108,7 @@ const K_EXPORT_COLUMNS = [
     'TotalTrials', 'ValidTrials', 'TimeoutTrials', 'TimeoutExclusionRate',
     'CorrectTrials', 'Accuracy_Exclude', 'K_Exclude',
     'Accuracy_TimeoutErr', 'K_TimeoutErr', 'MeanRT',
-    'LowAccFlag', 'LowAccBlockCount'
+    'LowAccFlag', 'LowAccBlockCount', 'InterruptedTrials'
 ];
 const K_TEXT_COLUMNS = new Set(['SubjectID', 'ExperimentType', 'Condition']);
 
@@ -1070,24 +1152,27 @@ function buildKRow(setSize, rows) {
     const nTotal = rows.length;
     const validRows = EXCLUDE_TIMEOUT_FROM_K
         ? rows.filter(d => d.CountedInK === 1 && d.timeout !== true)
-        : rows;
+        : rows.filter(d => d.TrialStatus !== 'interrupted');
     const nValid = validRows.length;
-    const nTimeout = nTotal - nValid;
+    const nTimeout = rows.filter(d => d.TrialStatus === 'timeout' || d.timeout === true).length;
+    const nInterrupted = rows.filter(d => d.TrialStatus === 'interrupted').length;
+    const nTimeoutErrorDenominator = nTotal - nInterrupted;
     const nCorrect = validRows.filter(d => d.accuracy === 1).length;
-    const acc = nValid > 0 ? nCorrect / nValid : 0;
+    const acc = nValid > 0 ? nCorrect / nValid : null;
 
-    const validRTs = validRows.filter(d => typeof d.rt === 'number').map(d => d.rt);
+    // 与鼠标版一致：汇总只统计有效且正确的试次；逐试次仍保留所有有效 RT。
+    const validRTs = validRows.filter(d => d.accuracy === 1 && Number.isFinite(d.rt)).map(d => d.rt);
     const rtMean = validRTs.length > 0
         ? validRTs.reduce((s, v) => s + v, 0) / validRTs.length
         : '';
 
     const N = setSize;
-    const K = N > 1 ? (acc * N * N - N) / (N - 1) : '';
+    const K = acc !== null && N > 1 ? (acc * N * N - N) / (N - 1) : '';
 
     // 备选口径：timeout 按错误计入
-    const nCorrectAll = rows.filter(d => d.accuracy === 1).length;
-    const accAll = nTotal > 0 ? nCorrectAll / nTotal : 0;
-    const KAll = N > 1 ? (accAll * N * N - N) / (N - 1) : '';
+    const nCorrectAll = rows.filter(d => d.TrialStatus !== 'interrupted' && d.accuracy === 1).length;
+    const accAll = nTimeoutErrorDenominator > 0 ? nCorrectAll / nTimeoutErrorDenominator : null;
+    const KAll = accAll !== null && N > 1 ? (accAll * N * N - N) / (N - 1) : '';
 
     return {
         SubjectID: p.subjectID,
@@ -1103,13 +1188,14 @@ function buildKRow(setSize, rows) {
         TimeoutTrials: nTimeout,
         TimeoutExclusionRate: nTotal > 0 ? Math.round(nTimeout / nTotal * 10000) / 10000 : '',
         CorrectTrials: nCorrect,
-        Accuracy_Exclude: Math.round(acc * 10000) / 10000,
+        Accuracy_Exclude: acc === null ? '' : Math.round(acc * 10000) / 10000,
         K_Exclude: K === '' ? '' : Math.round(K * 10000) / 10000,
-        Accuracy_TimeoutErr: Math.round(accAll * 10000) / 10000,
+        Accuracy_TimeoutErr: accAll === null ? '' : Math.round(accAll * 10000) / 10000,
         K_TimeoutErr: KAll === '' ? '' : Math.round(KAll * 10000) / 10000,
         MeanRT: rtMean === '' ? '' : Math.round(rtMean * 10000) / 10000,
         LowAccFlag: ss4LowAccuracyFlag && setSize === 4 ? 1 : 0,
-        LowAccBlockCount: lowAccBlockCount
+        LowAccBlockCount: lowAccBlockCount,
+        InterruptedTrials: nInterrupted
     };
 }
 
@@ -1118,14 +1204,15 @@ function markKRowsRed(sheet) {
     // XLSX 社区版不支持样式，空操作保留接口
 }
 
-// 补全被试信息与断点续做标记，保证 Trial Data 每行都带被试级字段
+// 补全被试信息，保证上传和导出的试次始终保留相同的被试级字段。
+// 线上接口目前仍沿用 Supabase，不从本函数实现断点续做。
 function enrichRows(rows) {
     for (const d of rows) {
         d.subjectID = p.subjectID;
         d.subName = p.subName;
         d.subGender = p.subGender;
         d.subAge = p.subAge;
-        d.subIdCard = p.subIdCard;
+        d.subIdCard = maskIdCard(p.subIdCard);
         d.subPhone = p.subPhone;
         d.rndSeed = p.rndSeed;
         d.subGroup = p.subGroup;
@@ -1210,7 +1297,8 @@ function downloadXLSX() {
     for (const ss of sortedSetSizes) {
         const ssRows = stimData.filter(d => Number(d.setSize) === ss);
         for (let c = 0; c < colors_9.length; c++) {
-            const colorRows = ssRows.filter(d => Number(d.correctColorIdx) === c);
+            const colorRows = ssRows.filter(d => d.TrialStatus !== 'interrupted'
+                && d.correctColorIdx != null && Number(d.correctColorIdx) === c);
             const nTotal = colorRows.length;
             const nCorrect = colorRows.filter(d => d.accuracy === 1).length;
             const acc = nTotal > 0 ? nCorrect / nTotal : null;
@@ -1284,17 +1372,23 @@ function saveWorkbookFile(wb, fileName) {
     const url = URL.createObjectURL(blob);
     lastExport = { url: url, fileName: fileName, size: u8.length };
 
+    // 即使浏览器拦截自动点击，也提供需要用户主动点击的有效下载入口。
+    showManualDownload(fileName, url);
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
     a.rel = 'noopener';
     a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    try {
+        document.body.appendChild(a);
+        a.click();
+    } catch (error) {
+        console.warn('[CLT] 自动下载未触发，可使用手动下载链接。', error);
+    } finally {
+        a.remove();
+    }
 
-    console.log(`[CLT] 已导出 ${fileName}（${u8.length} 字节，${wb.SheetNames.length} 个 sheet）`);
-    showManualDownload(fileName, url);
+    console.log(`[CLT] 已生成 ${fileName}（${u8.length} 字节，${wb.SheetNames.length} 个 sheet）`);
 }
 
 // 结束界面上的手动下载入口（文件名与自动下载一致）
