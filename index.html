@@ -12,7 +12,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
     <!-- 页面版本号：与 clt.js 的 CLT_BUILD 保持一致，用于检测浏览器是否缓存了旧 clt.js -->
-    <script>window.CLT_PAGE_BUILD = '20261126-123890-qa1';</script>
+    <script>window.CLT_PAGE_BUILD = '20261128-123890-qa2';</script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <!-- Excel 导出库：优先使用本地 vendor 版本（离线也能导出），失败再回退 CDN -->
     <script src="vendor/xlsx.full.min.js"></script>
@@ -168,12 +168,15 @@
             <span>数据文件未自动保存？点此下载：</span>
             <a id="manual-download-link" href="#" download>data.xlsx</a>
         </div>
-        <!-- 仅在数据上传/保存异常时显示（正常情况下隐藏，不干扰结束语画面） -->
-        <p class="end-status hidden" id="finished-text"></p>
+        <!-- 本地与服务器保存互不阻塞，分别显示各自状态。 -->
+        <div class="end-status" id="finished-text" role="status" aria-live="polite">
+            <div id="local-save-status"></div>
+            <div id="cloud-save-status"></div>
+        </div>
     </div>
 
     <!-- 版本号用于强制刷新浏览器缓存，每次修改 clt.js 后请同步递增 -->
-    <script src="clt.js?v=20261126-123890-qa1"></script>
+    <script src="clt.js?v=20261128-123890-qa2"></script>
 </body>
 
 </html>

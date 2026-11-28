@@ -56,7 +56,7 @@
 
 // 运行版本标记（与 clt.html 中 clt.js?v= 保持一致）：
 // 用于确认浏览器实际加载的是最新代码，而非缓存里的旧版本
-const CLT_BUILD = '20261126-123890-qa1';
+const CLT_BUILD = '20261128-123890-qa2';
 console.log('[CLT] build ' + CLT_BUILD + ' loaded');
 
 // 在设置页显示当前 build（确认浏览器加载的是最新代码，而非缓存中的旧版）
@@ -1002,69 +1002,61 @@ function stripToBaseColumns(row) {
 }
 
 async function finishExperiment() {
-    switchScreen('upload');
     experimentPhase = 'upload';
-
-    let uploadMsg = "";
-    let uploadFailed = false;
-
     enrichRows(stimData);
 
-    if (p.debugMode) {
-        uploadMsg += "调试模式：未上传至服务器。";
-    } else if (supabaseClient && stimData.length > 0) {
-        try {
-            const { error } = await supabaseClient.from('vwm_data').insert(stimData);
-            if (error) throw error;
-            uploadMsg += "数据上传服务器成功。";
-        } catch (error) {
-            console.error("Supabase Error:", error);
-            // 兼容旧表结构：剔除 CLT 新增列后重试
-            try {
-                const { error: retryError } = await supabaseClient
-                    .from('vwm_data').insert(stimData.map(stripToBaseColumns));
-                if (retryError) throw retryError;
-                uploadFailed = true;
-                uploadMsg += "服务器仅保存了基础字段；请保留完整的本地 Excel。";
-            } catch (retryErr) {
-                console.error("Supabase Retry Error:", retryErr);
-                uploadFailed = true;
-                uploadMsg += "服务器上传失败: " + retryErr.message + "。";
-            }
-        }
-    } else if (!supabaseClient) {
-        uploadFailed = true;
-        uploadMsg += "未配置服务器上传。";
-    }
+    // Excel 导出还会补充本地分组等字段，先保留原始的云端载荷，避免上传列意外变化。
+    const cloudRows = !p.debugMode && supabaseClient ? stimData.map(row => ({ ...row })) : [];
+    const localStatus = document.getElementById('local-save-status');
+    const cloudStatus = document.getElementById('cloud-save-status');
+    localStatus.innerText = p.saveLocal ? '本地 Excel：准备中。' : '本地 Excel：未选择导出。';
+    cloudStatus.innerText = p.debugMode
+        ? '服务器：调试模式，未上传。'
+        : !supabaseClient
+            ? '服务器：未配置上传。'
+            : cloudRows.length === 0
+                ? '服务器：没有可上传的试次。'
+                : '服务器：正在上传，请暂勿关闭页面。';
+    // 手动下载链接位于结束页；先显示结束页，不用等网络请求完成。
+    switchScreen('finished');
 
     if (p.saveLocal && stimData.length > 0) {
         try {
             downloadXLSX();
-            uploadMsg += "本地 Excel 已生成下载。";
-        } catch (e) {
-            console.error('[CLT] 本地导出失败:', e);
-            uploadFailed = true;
-            uploadMsg += "本地 Excel 导出失败：" + e.message + "。";
+            localStatus.innerText = '本地 Excel：文件已生成，可从下方链接下载。';
+        } catch (error) {
+            console.error('[CLT] 本地导出失败:', error);
+            localStatus.innerText = '本地 Excel：导出失败。';
         }
+    } else if (p.saveLocal) {
+        localStatus.innerText = '本地 Excel：没有可导出的试次。';
     }
 
-    document.getElementById('upload-status').innerText = uploadMsg;
+    try {
+        if (document.exitFullscreen) {
+            const exiting = document.exitFullscreen();
+            if (exiting) exiting.catch(() => {});
+        }
+    } catch (error) { /* 已非全屏时无需处理 */ }
 
-    // 结束语画面保持干净：仅在异常时显示状态说明
-    const statusEl = document.getElementById('finished-text');
-    if (statusEl) {
-        if (uploadFailed) {
-            statusEl.innerText = uploadMsg;
-            statusEl.classList.remove('hidden');
-        } else {
-            statusEl.innerText = '';
-            statusEl.classList.add('hidden');
+    if (cloudRows.length === 0) return;
+    try {
+        const { error } = await supabaseClient.from('vwm_data').insert(cloudRows);
+        if (error) throw error;
+        cloudStatus.innerText = '服务器：上传成功。';
+    } catch (error) {
+        console.error('Supabase Error:', error);
+        // 兼容旧表结构：保留原有的一次基础字段回退。
+        try {
+            const { error: retryError } = await supabaseClient
+                .from('vwm_data').insert(cloudRows.map(stripToBaseColumns));
+            if (retryError) throw retryError;
+            cloudStatus.innerText = '服务器：仅保存了基础字段；请保留完整的本地 Excel。';
+        } catch (retryError) {
+            console.error('Supabase Retry Error:', retryError);
+            cloudStatus.innerText = '服务器：上传失败。请查看上方本地 Excel 状态。';
         }
     }
-
-    setTimeout(() => { switchScreen('finished'); }, 2000);
-
-    try { if (document.exitFullscreen) document.exitFullscreen(); } catch (e) {}
 }
 
 // ============================================================
@@ -1380,17 +1372,23 @@ function saveWorkbookFile(wb, fileName) {
     const url = URL.createObjectURL(blob);
     lastExport = { url: url, fileName: fileName, size: u8.length };
 
+    // 即使浏览器拦截自动点击，也提供需要用户主动点击的有效下载入口。
+    showManualDownload(fileName, url);
     const a = document.createElement('a');
     a.href = url;
     a.download = fileName;
     a.rel = 'noopener';
     a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    try {
+        document.body.appendChild(a);
+        a.click();
+    } catch (error) {
+        console.warn('[CLT] 自动下载未触发，可使用手动下载链接。', error);
+    } finally {
+        a.remove();
+    }
 
-    console.log(`[CLT] 已导出 ${fileName}（${u8.length} 字节，${wb.SheetNames.length} 个 sheet）`);
-    showManualDownload(fileName, url);
+    console.log(`[CLT] 已生成 ${fileName}（${u8.length} 字节，${wb.SheetNames.length} 个 sheet）`);
 }
 
 // 结束界面上的手动下载入口（文件名与自动下载一致）

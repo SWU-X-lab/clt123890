@@ -6,7 +6,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '..', 'clt.js'), 'utf8');
 
-function harness({ group = '1', code = 'Study_ABC123', failFullRow = false } = {}) {
+function harness({ group = '1', code = 'Study_ABC123', failFullRow = false,
+    actualExport = false, blockAutoDownload = false, exportError = false, insertOverride = null } = {}) {
     const elements = new Map();
     const windowListeners = {};
     const documentListeners = {};
@@ -17,21 +18,42 @@ function harness({ group = '1', code = 'Study_ABC123', failFullRow = false } = {
     let initialize = 0;
     const writes = [];
     const sheets = {};
+    const events = [];
+    let autoClicks = 0;
     const noop = () => {};
     const canvasContext = new Proxy({}, { get: (t, key) => t[key] || noop });
     function element(id) {
-        if (!elements.has(id)) elements.set(id, {
-            listeners: {}, classList: { add: noop, remove: noop },
+        if (!elements.has(id)) {
+            const classes = new Set(['hidden']);
+            elements.set(id, {
+            listeners: {}, classList: {
+                add: cssClass => classes.add(cssClass),
+                remove: cssClass => classes.delete(cssClass),
+                contains: cssClass => classes.has(cssClass)
+            },
             value: id === 'subGroup' ? group : id === 'participantCode' ? code : '',
             addEventListener(type, fn) { this.listeners[type] = fn; },
             reportValidity: () => true,
             getContext: () => canvasContext,
             width: 1024, height: 768
-        });
+            });
+        }
         return elements.get(id);
     }
     const document = {
         getElementById: element, documentElement: {}, hidden: false,
+        body: { appendChild: noop },
+        createElement() {
+            return {
+                style: {},
+                click() {
+                    autoClicks++;
+                    events.push('autoDownload');
+                    if (blockAutoDownload) throw new Error('测试自动下载被阻拦');
+                },
+                remove: noop
+            };
+        },
         hasFocus: () => focused, exitFullscreen: noop,
         addEventListener(type, listener) { documentListeners[type] = listener; }
     };
@@ -41,13 +63,24 @@ function harness({ group = '1', code = 'Study_ABC123', failFullRow = false } = {
             initialize++;
             return { from: () => ({ insert: async rows => {
                 writes.push(JSON.parse(JSON.stringify(rows)));
+                events.push('insert');
+                if (insertOverride) return insertOverride(rows, writes.length);
                 return { error: failFullRow && writes.length === 1 ? new Error('测试列缺失') : null };
             } }) };
         } }
     };
-    const XLSX = { utils: {
-        json_to_sheet(data, options) { return { data, header: options.header }; }
-    } };
+    const XLSX = {
+        utils: {
+            json_to_sheet(data, options) { return { data, header: options.header }; },
+            book_new: () => ({ SheetNames: [] }),
+            book_append_sheet: (workbook, sheet, name) => workbook.SheetNames.push(name)
+        },
+        write() {
+            events.push('generateWorkbook');
+            if (exportError) throw new Error('测试 Excel 生成失败');
+            return Uint8Array.of(0x50, 0x4b);
+        }
+    };
     const fixture = vm.runInNewContext(source + `
         ;({
             buildKRow, kSheetFromRows, participantSeed, finishExperiment, startFormal, runTrial,
@@ -66,7 +99,8 @@ function harness({ group = '1', code = 'Study_ABC123', failFullRow = false } = {
             },
             setTimer(id) { responseTimer = id; }
         })`, {
-            document, window, XLSX,
+            document, window, XLSX, Uint8Array, Blob,
+            URL: { createObjectURL: () => 'blob:mock-local-workbook' },
             performance: { now: () => time },
             setTimeout(fn) { timers.set(++timer, fn); return timer; },
             clearTimeout(id) { timers.delete(id); },
@@ -75,8 +109,9 @@ function harness({ group = '1', code = 'Study_ABC123', failFullRow = false } = {
             alert: noop, crypto: { randomUUID: () => 'mock-run-id' }
         });
     fixture.stopDraw();
-    fixture.mockExport(() => { sheets.downloads = (sheets.downloads || 0) + 1; });
-    return { fixture, document, elements, getInitialize: () => initialize, writes, sheets, timers,
+    if (!actualExport) fixture.mockExport(() => { sheets.downloads = (sheets.downloads || 0) + 1; });
+    return { fixture, document, elements, getInitialize: () => initialize, writes, sheets, timers, events,
+        getAutoClicks: () => autoClicks,
         start: () => element('start-btn').listeners.click(),
         executeKey: key => windowListeners.keydown({ key, code: key === ' ' ? 'Space' : '', repeat: false, preventDefault: noop }),
         hide: () => { document.hidden = true; focused = false; documentListeners.visibilitychange(); },
@@ -163,7 +198,7 @@ test('正式组保留旧表基础字段兼容，但回退时明显提示，应�
     assert.equal(h.writes.length, 2);
     assert.equal(h.writes[0][0].responseColorIdx, 8);
     assert.equal(Object.hasOwn(h.writes[1][0], 'responseColorIdx'), false);
-    assert.match(h.elements.get('finished-text').innerText, /仅保存了基础字段/);
+    assert.match(h.elements.get('cloud-save-status').innerText, /仅保存了基础字段/);
     assert.equal(h.sheets.downloads, 1);
 });
 
@@ -199,7 +234,64 @@ test('两个入口都对齐匿名输入与新构建版本，仍加载同一脚�
     for (const file of ['index.html', 'clt_123890.html']) {
         const html = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
         assert.match(html, /id="participantCode"/);
-        assert.match(html, /clt\.js\?v=20261126-123890-qa1/);
-        assert.match(html, /CLT_PAGE_BUILD = '20261126-123890-qa1'/);
+        assert.match(html, /clt\.js\?v=20261128-123890-qa2/);
+        assert.match(html, /CLT_PAGE_BUILD = '20261128-123890-qa2'/);
     }
+});
+
+
+test('等待正式上传时结束页及手动 Excel 链接均已可用，云端载荷不夹带导出字段', async () => {
+    let resolveInsert;
+    const pendingInsert = new Promise(resolve => { resolveInsert = resolve; });
+    const h = harness({ actualExport: true, blockAutoDownload: true, insertOverride: () => pendingInsert });
+    await h.start();
+    h.fixture.setData([row(1, 0.4)]);
+    const pending = h.fixture.finishExperiment();
+
+    assert.deepEqual(h.events, ['generateWorkbook', 'autoDownload', 'insert']);
+    assert.equal(h.elements.get('finished-phase').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('manual-download').classList.contains('hidden'), false);
+    assert.equal(h.elements.get('manual-download-link').href, 'blob:mock-local-workbook');
+    assert.match(h.elements.get('local-save-status').innerText, /已生成/);
+    assert.match(h.elements.get('cloud-save-status').innerText, /正在上传/);
+    assert.equal(h.getAutoClicks(), 1);
+    assert.equal(h.writes[0][0].subjectID, 'Study_ABC123');
+    assert.equal(Object.hasOwn(h.writes[0][0], 'GroupIndex'), false);
+    assert.equal(Object.hasOwn(h.writes[0][0], 'GroupLabel'), false);
+
+    resolveInsert({ error: null });
+    await pending;
+    assert.match(h.elements.get('cloud-save-status').innerText, /上传成功/);
+    assert.match(h.elements.get('local-save-status').innerText, /已生成/);
+    assert.equal(h.getAutoClicks(), 1);
+});
+
+test('正式上传失败不影响本地 Excel，保留既有的一次基础字段回退，不增加重试', async () => {
+    const h = harness({ actualExport: true, insertOverride: () => ({ error: new Error('测试服务器失败') }) });
+    await h.start();
+    h.fixture.setData([row(1, 0.5)]);
+    await h.fixture.finishExperiment();
+    assert.equal(h.writes.length, 2);
+    assert.equal(h.elements.get('manual-download').classList.contains('hidden'), false);
+    assert.match(h.elements.get('local-save-status').innerText, /已生成/);
+    assert.match(h.elements.get('cloud-save-status').innerText, /上传失败/);
+});
+
+test('本地导出失败不阻断正式上传；未选择本地导出时不触发自动下载', async () => {
+    const broken = harness({ actualExport: true, exportError: true });
+    await broken.start();
+    broken.fixture.setData([row(1, 0.45)]);
+    await broken.fixture.finishExperiment();
+    assert.match(broken.elements.get('local-save-status').innerText, /导出失败/);
+    assert.match(broken.elements.get('cloud-save-status').innerText, /上传成功/);
+    assert.equal(broken.getAutoClicks(), 0);
+
+    const unchecked = harness({ actualExport: true });
+    await unchecked.start();
+    unchecked.fixture.getP().saveLocal = false;
+    unchecked.fixture.setData([row(1, 0.45)]);
+    await unchecked.fixture.finishExperiment();
+    assert.deepEqual(unchecked.events, ['insert']);
+    assert.match(unchecked.elements.get('local-save-status').innerText, /未选择导出/);
+    assert.match(unchecked.elements.get('cloud-save-status').innerText, /上传成功/);
 });
